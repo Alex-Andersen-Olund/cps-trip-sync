@@ -43,12 +43,12 @@ class NavTripClient:
         encoded = requests.utils.quote(company_name, safe="")
         return f"{self.nav_base}/Company('{encoded}')"
 
-    def _get_all(self, url: str, params: dict = None) -> list:
+    def _get_all(self, url: str, params: dict = None, timeout: int = 120) -> list:
         """Paginated GET — follows @odata.nextLink."""
         results = []
         while url:
             resp = requests.get(url, headers=self.headers, auth=self.auth,
-                                params=params, timeout=60)
+                                params=params, timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
             results.extend(data.get("value", []))
