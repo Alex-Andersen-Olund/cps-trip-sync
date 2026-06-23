@@ -33,19 +33,19 @@ def sync_company_down(company: str, from_date: date, to_date: date,
     nav = NavTripClient()
     now = datetime.now(timezone.utc)
 
-    print(f"  [{company}] fetching trips {from_date} → {to_date}...")
+    logging.info(f"[{company}] fetching trips {from_date} → {to_date}...")
     try:
         trips = nav.get_partial_trips(company, from_date, to_date)
     except Exception as e:
-        print(f"  [{company}] WARNING: could not fetch trips — {e}")
+        logging.warning(f"[{company}] could not fetch trips — {e}")
         return {"trips": 0, "routes": 0, "trip_list": 0, "add_res": 0}
 
     if not trips:
-        print(f"  [{company}] 0 trips — skipping")
+        logging.info(f"[{company}] 0 trips in window — skipping")
         return {"trips": 0, "routes": 0, "trip_list": 0, "add_res": 0}
 
     trip_nos = list({t.get("Trip_No", "") for t in trips if t.get("Trip_No")})
-    print(f"  [{company}] {len(trips)} trips, fetching routes + trip_list + plan_info_2 + add_res...")
+    logging.info(f"[{company}] {len(trips)} trips, fetching routes + trip_list + plan_info_2 + add_res...")
 
     if sync_supplements:
         routes     = _fetch(company, "routes",      lambda: nav.get_routes(company, trip_nos))
@@ -79,8 +79,7 @@ def sync_company_down(company: str, from_date: date, to_date: date,
         ar_count = _merge_add_res(cursor, add_res, now)
 
     summary = {"trips": t_count, "routes": r_count, "trip_list": tl_count, "add_res": ar_count}
-    print(f"  [{company}] trips={t_count} routes={r_count} "
-          f"trip_list={tl_count} add_res={ar_count}")
+    logging.info(f"[{company}] done — trips={t_count} routes={r_count} trip_list={tl_count} add_res={ar_count}")
     return summary
 
 
