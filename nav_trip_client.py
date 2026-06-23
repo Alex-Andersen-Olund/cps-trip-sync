@@ -193,7 +193,8 @@ class NavTripClient:
             f"{self.nav_base}/Company('{encoded_company}')"
             f"/PartialTrip(Trip_No='{encoded_trip}',Line_No={line_no})"
         )
-        resp = requests.patch(url, headers=self.headers, auth=self.auth,
+        patch_headers = {**self.headers, "If-Match": "*"}
+        resp = requests.patch(url, headers=patch_headers, auth=self.auth,
                               data=json.dumps(fields), timeout=30)
         resp.raise_for_status()
 
