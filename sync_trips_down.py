@@ -15,6 +15,7 @@ Performance:
   All rows for a table are bulk-inserted into a #tmp_* table via executemany,
   then a single MERGE statement handles insert/update in one roundtrip.
 """
+import logging
 from datetime import datetime, timezone, date, timedelta
 from db_client import get_connection
 from nav_trip_client import NavTripClient
@@ -505,7 +506,7 @@ def _fetch(company, label, fn, default=None):
     try:
         return fn()
     except Exception as e:
-        print(f"  [{company}] WARNING: {label} failed — {e}")
+        logging.warning(f"[{company}] {label} failed — {e}")
         return default
 
 
