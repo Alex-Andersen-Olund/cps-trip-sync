@@ -93,24 +93,42 @@ class NavTripClient:
 
     def get_partial_trips(self, company: str,
                           from_date: date = None,
-                          to_date: date = None) -> list:
-        """Fetch all PartialTrips for a company within the date window.
+                          to_date: date = None,
+                          use_status_filter: bool = False) -> list:
+        """Fetch all PartialTrips for a company.
 
-        Default window: today-3 to today+7.
+        use_status_filter=True (preferred):
+            Status lt 30 and Starting_Date ge today-7
+            Captures all open trips regardless of planned start date,
+            with a 7-day lookback as a safety net against stale status.
+
+        use_status_filter=False (date window fallback):
+            Starting_Date ge from_date and le to_date
+            Default window: today-3 to today+7.
+
         Returns raw NAV dicts.
         """
-        if from_date is None:
-            from_date = date.today() - timedelta(days=3)
-        if to_date is None:
-            to_date = date.today() + timedelta(days=3)
-
         url = f"{self._company_url(company)}/PartialTripAll"
-        params = {
-            "$filter": (
-                f"Starting_Date ge {from_date.isoformat()}T00:00:00Z "
-                f"and Starting_Date le {to_date.isoformat()}T23:59:59Z"
-            )
-        }
+
+        if use_status_filter:
+            cutoff = (date.today() - timedelta(days=7)).isoformat()
+            # Status is Edm.String in NAV OData — use ne '30' (not delivered),
+            # combined with date cutoff as safety net against old stale trips.
+            params = {
+                "$filter": f"Status ne '30' and Starting_Date ge {cutoff}T00:00:00Z"
+            }
+        else:
+            if from_date is None:
+                from_date = date.today() - timedelta(days=3)
+            if to_date is None:
+                to_date = date.today() + timedelta(days=3)
+            params = {
+                "$filter": (
+                    f"Starting_Date ge {from_date.isoformat()}T00:00:00Z "
+                    f"and Starting_Date le {to_date.isoformat()}T23:59:59Z"
+                )
+            }
+
         return self._get_all(url, params)
 
     # ------------------------------------------------------------------ #
@@ -124,7 +142,7 @@ class NavTripClient:
         results = []
         for f in self._batch_filter("Trip_No", trip_nos):
             url = f"{self._company_url(company)}/Route"
-            results.extend(self._get_all(url, {"$filter": f}))
+            results.extend(self._get_all(url, {"$filter": f}, timeout=300))
         return results
 
     # ------------------------------------------------------------------ #
@@ -138,7 +156,7 @@ class NavTripClient:
         results = []
         for f in self._batch_filter("Trip_No", trip_nos):
             url = f"{self._company_url(company)}/TripList"
-            results.extend(self._get_all(url, {"$filter": f}))
+            results.extend(self._get_all(url, {"$filter": f}, timeout=300))
         return results
 
     # ------------------------------------------------------------------ #

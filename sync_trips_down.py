@@ -21,9 +21,13 @@ from db_client import get_connection
 from nav_trip_client import NavTripClient
 
 
-def sync_company_down(company: str, from_date: date, to_date: date,
-                      sync_supplements: bool = True) -> dict:
-    """Sync trips for a single company within the given date window.
+def sync_company_down(company: str, from_date: date = None, to_date: date = None,
+                      sync_supplements: bool = True,
+                      use_status_filter: bool = False) -> dict:
+    """Sync trips for a single company.
+
+    use_status_filter=True  — use Status lt 30 + Starting_Date ge today-7 (preferred)
+    use_status_filter=False — use explicit from_date / to_date window
 
     Called directly by queue triggers (one message per company) so each
     company runs in its own isolated Function instance.
@@ -33,9 +37,10 @@ def sync_company_down(company: str, from_date: date, to_date: date,
     nav = NavTripClient()
     now = datetime.now(timezone.utc)
 
-    logging.info(f"[{company}] fetching trips {from_date} → {to_date}...")
+    filter_desc = "status<30 + last 7d" if use_status_filter else f"{from_date} → {to_date}"
+    logging.info(f"[{company}] fetching trips ({filter_desc})...")
     try:
-        trips = nav.get_partial_trips(company, from_date, to_date)
+        trips = nav.get_partial_trips(company, from_date, to_date, use_status_filter)
     except Exception as e:
         logging.warning(f"[{company}] could not fetch trips — {e}")
         return {"trips": 0, "routes": 0, "trip_list": 0, "add_res": 0}
@@ -45,12 +50,23 @@ def sync_company_down(company: str, from_date: date, to_date: date,
         return {"trips": 0, "routes": 0, "trip_list": 0, "add_res": 0}
 
     trip_nos = list({t.get("Trip_No", "") for t in trips if t.get("Trip_No")})
-    logging.info(f"[{company}] {len(trips)} trips, fetching routes + trip_list + plan_info_2 + add_res...")
+
+    # Only fetch supplements for active (non-delivered) trips.
+    # Status '30' = delivered — routes/trip_list won't change, no need to re-sync.
+    # This limits supplement batches to ~2700 instead of ~4300 on full window.
+    active_trip_nos = list({
+        t.get("Trip_No", "") for t in trips
+        if t.get("Trip_No") and t.get("Status", "") != "30"
+    })
+    logging.info(
+        f"[{company}] {len(trips)} trips ({len(active_trip_nos)} active), "
+        f"fetching routes + trip_list + plan_info_2 + add_res..."
+    )
 
     if sync_supplements:
-        routes     = _fetch(company, "routes",      lambda: nav.get_routes(company, trip_nos))
-        trip_list  = _fetch(company, "trip_list",   lambda: nav.get_trip_list(company, trip_nos))
-        plan_info2 = _fetch(company, "plan_info_2", lambda: nav.get_plan_info_2(company, trip_nos), default={})
+        routes     = _fetch(company, "routes",      lambda: nav.get_routes(company, active_trip_nos))
+        trip_list  = _fetch(company, "trip_list",   lambda: nav.get_trip_list(company, active_trip_nos))
+        plan_info2 = _fetch(company, "plan_info_2", lambda: nav.get_plan_info_2(company, active_trip_nos), default={})
         # Additional resources endpoint requires both Trip_No and PT_Line_No filters
         add_res_pairs = [
             (t.get("Trip_No", ""), t.get("Line_No", 0))

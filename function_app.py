@@ -2,7 +2,7 @@
 function_app.py — Azure Functions v2 entry point for cps-trip-sync.
 
 Functions:
-  trip_down_fast_timer  — enqueues one message per company (narrow window, every 2 min)
+  trip_down_fast_timer  — enqueues one message per company (status filter: Status<30 + last 7d, every 2 min)
   trip_down_fast_queue  — processes one company from fast queue
   trip_down_full_timer  — enqueues one message per company (full window, every 30 min)
   trip_down_full_queue  — processes one company from full queue
@@ -54,23 +54,19 @@ _FULL_QUEUE = "trip-sync-full-queue"
 )
 def trip_down_fast_timer(timer: func.TimerRequest,
                          outputQueue: func.Out[typing.List[str]]) -> None:
-    """Every 2 min: enqueue one message per company for the narrow operational window."""
+    """Every 2 min: enqueue one message per company — status-based filter (open trips, last 7d)."""
     if timer.past_due:
         logging.warning("trip_down_fast_timer: past due")
-
-    today = date.today()
-    from_date = today - timedelta(days=1)
-    to_date   = today + timedelta(days=2)
 
     nav = NavTripClient()
     companies = nav.get_companies()
 
     messages = [
-        json.dumps({"company": c, "from_date": from_date.isoformat(), "to_date": to_date.isoformat()})
+        json.dumps({"company": c, "filter_mode": "status"})
         for c in companies
     ]
     outputQueue.set(messages)
-    logging.info(f"trip_down_fast_timer: enqueued {len(messages)} company messages")
+    logging.info(f"trip_down_fast_timer: enqueued {len(messages)} company messages (status filter)")
 
 
 @app.queue_trigger(
@@ -79,14 +75,25 @@ def trip_down_fast_timer(timer: func.TimerRequest,
     connection="AzureWebJobsStorage"
 )
 def trip_down_fast_queue(msg: func.QueueMessage) -> None:
-    """Process one company from the fast queue — runs in parallel per company."""
-    payload   = json.loads(msg.get_body().decode())
-    company   = payload["company"]
-    from_date = date.fromisoformat(payload["from_date"])
-    to_date   = date.fromisoformat(payload["to_date"])
+    """Process one company from the fast queue — runs in parallel per company.
 
-    logging.info(f"trip_down_fast_queue: [{company}] {from_date} → {to_date}")
-    sync_company_down(company, from_date, to_date)
+    Supports two message formats:
+      {"company": "...", "filter_mode": "status"}          — status-based filter (new)
+      {"company": "...", "from_date": "...", "to_date": "..."}  — date window (legacy)
+    """
+    payload     = json.loads(msg.get_body().decode())
+    company     = payload["company"]
+    filter_mode = payload.get("filter_mode", "date")
+
+    if filter_mode == "status":
+        logging.info(f"trip_down_fast_queue: [{company}] status<30 + last 7d")
+        # Fast path: trips only — routes/trip_list handled by full queue (30 min)
+        sync_company_down(company, use_status_filter=True, sync_supplements=False)
+    else:
+        from_date = date.fromisoformat(payload["from_date"])
+        to_date   = date.fromisoformat(payload["to_date"])
+        logging.info(f"trip_down_fast_queue: [{company}] {from_date} → {to_date}")
+        sync_company_down(company, from_date, to_date, sync_supplements=False)
 
 
 # ------------------------------------------------------------------ #
