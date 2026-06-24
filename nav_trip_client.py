@@ -98,7 +98,7 @@ class NavTripClient:
         """Fetch all PartialTrips for a company.
 
         use_status_filter=True (preferred):
-            Status lt 30 and Starting_Date ge today-7
+            Status ne '30' and Starting_Date ge today-7
             Captures all open trips regardless of planned start date,
             with a 7-day lookback as a safety net against stale status.
 
@@ -212,21 +212,4 @@ class NavTripClient:
             f"/PartialTrip(Trip_No='{encoded_trip}',Line_No={line_no})"
         )
         patch_headers = {**self.headers, "If-Match": "*"}
-        resp = requests.patch(url, headers=patch_headers, auth=self.auth,
-                              data=json.dumps(fields), timeout=30)
-        resp.raise_for_status()
-
-    # ------------------------------------------------------------------ #
-    # POST AdditionalResource — create or remove Trailer2/Dolly
-    # ------------------------------------------------------------------ #
-
-    def post_additional_resource(self, company: str, payload: dict) -> None:
-        """POST to PartialTripWS_PT_additional_resource.
-
-        To remove: include Delete=true in payload.
-        Raises requests.HTTPError on failure.
-        """
-        url = f"{self._company_url(company)}/PartialTripWS_PT_additional_resource"
-        resp = requests.post(url, headers=self.headers, auth=self.auth,
-                             data=json.dumps(payload), timeout=30)
-        resp.raise_for_status()
+        resp = requests.patch(url,

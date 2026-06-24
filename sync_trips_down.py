@@ -23,11 +23,14 @@ from nav_trip_client import NavTripClient
 
 def sync_company_down(company: str, from_date: date = None, to_date: date = None,
                       sync_supplements: bool = True,
-                      use_status_filter: bool = False) -> dict:
+                      use_status_filter: bool = False,
+                      sync_plan_info_2: bool = True) -> dict:
     """Sync trips for a single company.
 
-    use_status_filter=True  — use Status lt 30 + Starting_Date ge today-7 (preferred)
+    use_status_filter=True  — use Status ne '30' + Starting_Date ge today-7 (preferred)
     use_status_filter=False — use explicit from_date / to_date window
+    sync_plan_info_2=False  — skip PartialTrip plan_info_2 batch (saves ~24 OData calls,
+                              reduces full-queue runtime from ~22 min to ~14 min)
 
     Called directly by queue triggers (one message per company) so each
     company runs in its own isolated Function instance.
@@ -51,22 +54,34 @@ def sync_company_down(company: str, from_date: date = None, to_date: date = None
 
     trip_nos = list({t.get("Trip_No", "") for t in trips if t.get("Trip_No")})
 
-    # Only fetch supplements for active (non-delivered) trips.
-    # Status '30' = delivered — routes/trip_list won't change, no need to re-sync.
-    # This limits supplement batches to ~2700 instead of ~4300 on full window.
-    active_trip_nos = list({
-        t.get("Trip_No", "") for t in trips
-        if t.get("Trip_No") and t.get("Status", "") != "30"
-    })
-    logging.info(
-        f"[{company}] {len(trips)} trips ({len(active_trip_nos)} active), "
-        f"fetching routes + trip_list + plan_info_2 + add_res..."
-    )
-
     if sync_supplements:
-        routes     = _fetch(company, "routes",      lambda: nav.get_routes(company, active_trip_nos))
-        trip_list  = _fetch(company, "trip_list",   lambda: nav.get_trip_list(company, active_trip_nos))
-        plan_info2 = _fetch(company, "plan_info_2", lambda: nav.get_plan_info_2(company, active_trip_nos), default={})
+        # Fetch supplements only for trips in the operational window: yesterday → today+7.
+        # Lower bound (yesterday) excludes historical completed trips that accumulated in
+        # the status filter but don't need fresh route/trip_list data.
+        # Upper bound (today+7) excludes far-future planning-stage trips with no routes yet.
+        # With ~2000 status-open trips, this narrows the supplement batch to ~500-800 trips
+        # (≈5-8 OData batches per endpoint instead of 20+), keeping runtime well under 30 min.
+        min_supplement_date = date.today() - timedelta(days=1)
+        cutoff = date.today() + timedelta(days=7)
+        active_trip_nos = list({
+            t.get("Trip_No", "") for t in trips
+            if t.get("Trip_No")
+            and t.get("Status", "") != "30"
+            and _parse_date(t.get("Starting_Date")) is not None
+            and min_supplement_date <= _parse_date(t.get("Starting_Date")).date() <= cutoff
+        })
+        logging.info(
+            f"[{company}] {len(trips)} trips ({len(active_trip_nos)} within supplement window "
+            f"{min_supplement_date} – {cutoff}), fetching routes + trip_list + plan_info_2 + add_res..."
+        )
+        routes    = _fetch(company, "routes",    lambda: nav.get_routes(company, active_trip_nos))
+        trip_list = _fetch(company, "trip_list", lambda: nav.get_trip_list(company, active_trip_nos))
+        if sync_plan_info_2:
+            plan_info2 = _fetch(company, "plan_info_2",
+                                lambda: nav.get_plan_info_2(company, active_trip_nos), default={})
+        else:
+            plan_info2 = {}
+            logging.info(f"[{company}] plan_info_2 skipped (sync_plan_info_2=False)")
         # Additional resources endpoint requires both Trip_No and PT_Line_No filters
         add_res_pairs = [
             (t.get("Trip_No", ""), t.get("Line_No", 0))
@@ -77,6 +92,7 @@ def sync_company_down(company: str, from_date: date = None, to_date: date = None
             add_res.extend(_fetch(company, f"add_res({tn}/{ln})",
                                   lambda tn=tn, ln=ln: nav.get_additional_resources(company, tn, ln)))
     else:
+        logging.info(f"[{company}] {len(trips)} trips — trips-only sync (supplements skipped)")
         routes, trip_list, plan_info2, add_res = [], [], {}, []
 
     with get_connection() as conn:
@@ -100,10 +116,10 @@ def sync_company_down(company: str, from_date: date = None, to_date: date = None
 
 
 def sync_trips_down(sync_supplements: bool = True):
-    """Backward-compat: sync all companies with the default full date window.
+    """Sync all companies using the default date window (today-3 to today+7).
 
-    Used by the existing trip_down_timer / trip_down_http until the queue-based
-    triggers (trip_down_fast / trip_down_full) are deployed and verified.
+    Used by run_trip_down.py CLI. The deployed Function App uses the queue-based
+    triggers (trip_down_fast_queue / trip_down_full_queue) instead.
     """
     nav = NavTripClient()
     companies = nav.get_companies()
@@ -116,8 +132,8 @@ def sync_trips_down(sync_supplements: bool = True):
         for k in total:
             total[k] += result[k]
 
-    print(f"[sync_trips_down] Done — trips={total['trips']} routes={total['routes']} "
-          f"trip_list={total['trip_list']} add_res={total['add_res']}")
+    logging.info(f"[sync_trips_down] Done — trips={total['trips']} routes={total['routes']} "
+                 f"trip_list={total['trip_list']} add_res={total['add_res']}")
 
 
 # ------------------------------------------------------------------ #
@@ -142,23 +158,23 @@ def _merge_trips(cursor, trips, plan_info2, pending, company, now):
             start_time           NVARCHAR(10),
             ending_date          DATETIME2,
             end_time             NVARCHAR(10),
-            start_country        NVARCHAR(10),
+            start_country        NVARCHAR(50),
             start_city           NVARCHAR(MAX),
-            end_country          NVARCHAR(10),
+            end_country          NVARCHAR(50),
             end_city             NVARCHAR(MAX),
-            department           NVARCHAR(20),
-            plan_department      NVARCHAR(20),
-            subdepartment        NVARCHAR(20),
-            vehicle              NVARCHAR(20),
-            trailer              NVARCHAR(20),
-            driver               NVARCHAR(20),
-            driver_2             NVARCHAR(20),
-            status               NVARCHAR(5),
+            department           NVARCHAR(50),
+            plan_department      NVARCHAR(50),
+            subdepartment        NVARCHAR(50),
+            vehicle              NVARCHAR(50),
+            trailer              NVARCHAR(50),
+            driver               NVARCHAR(50),
+            driver_2             NVARCHAR(50),
+            status               NVARCHAR(20),
             plan_info            NVARCHAR(MAX),
             plan_info_2          NVARCHAR(MAX),
             txt_product          NVARCHAR(MAX),
-            txt_file             NVARCHAR(50),
-            eupl                 NVARCHAR(20),
+            txt_file             NVARCHAR(MAX),
+            eupl                 NVARCHAR(50),
             additional_resources BIT,
             actual_starting_date DATETIME2,
             actual_ending_date   DATETIME2,
@@ -194,13 +210,14 @@ def _merge_trips(cursor, trips, plan_info2, pending, company, now):
         rows
     )
 
-    # Two WHEN MATCHED branches: one for normal trips (full update), one for
-    # pending trips (skip resource assignment fields)
+    # Single WHEN MATCHED branch — SQL Server forbids multiple WHEN MATCHED
+    # clauses. Resource assignment fields (vehicle/trailer/driver/driver_2) are
+    # preserved via CASE when a pending CPS write is in flight.
     cursor.execute("""
         MERGE trips AS tgt
         USING #tmp_trips AS src
             ON tgt.trip_no = src.trip_no AND tgt.line_no = src.line_no
-        WHEN MATCHED AND src.has_pending = 0 THEN UPDATE SET
+        WHEN MATCHED THEN UPDATE SET
             partial_trip         = src.partial_trip,
             starting_date        = src.starting_date,
             start_time           = src.start_time,
@@ -213,34 +230,10 @@ def _merge_trips(cursor, trips, plan_info2, pending, company, now):
             department           = src.department,
             plan_department      = src.plan_department,
             subdepartment        = src.subdepartment,
-            vehicle              = src.vehicle,
-            trailer              = src.trailer,
-            driver               = src.driver,
-            driver_2             = src.driver_2,
-            status               = src.status,
-            plan_info            = src.plan_info,
-            plan_info_2          = src.plan_info_2,
-            txt_product          = src.txt_product,
-            txt_file             = src.txt_file,
-            eupl                 = src.eupl,
-            additional_resources = src.additional_resources,
-            actual_starting_date = src.actual_starting_date,
-            actual_ending_date   = src.actual_ending_date,
-            nav_updated_at       = ?,
-            updated_at           = ?
-        WHEN MATCHED AND src.has_pending = 1 THEN UPDATE SET
-            partial_trip         = src.partial_trip,
-            starting_date        = src.starting_date,
-            start_time           = src.start_time,
-            ending_date          = src.ending_date,
-            end_time             = src.end_time,
-            start_country        = src.start_country,
-            start_city           = src.start_city,
-            end_country          = src.end_country,
-            end_city             = src.end_city,
-            department           = src.department,
-            plan_department      = src.plan_department,
-            subdepartment        = src.subdepartment,
+            vehicle              = CASE WHEN src.has_pending = 0 THEN src.vehicle   ELSE tgt.vehicle   END,
+            trailer              = CASE WHEN src.has_pending = 0 THEN src.trailer   ELSE tgt.trailer   END,
+            driver               = CASE WHEN src.has_pending = 0 THEN src.driver    ELSE tgt.driver    END,
+            driver_2             = CASE WHEN src.has_pending = 0 THEN src.driver_2  ELSE tgt.driver_2  END,
             status               = src.status,
             plan_info            = src.plan_info,
             plan_info_2          = src.plan_info_2,
@@ -275,7 +268,7 @@ def _merge_trips(cursor, trips, plan_info2, pending, company, now):
             src.actual_starting_date, src.actual_ending_date,
             ?, ?, ?
         );
-    """, (now, now, now, now, company, now, now))
+    """, (now, now, company, now, now))
 
     cursor.execute("DROP TABLE #tmp_trips")
     return len(rows)
@@ -516,33 +509,4 @@ def _merge_add_res(cursor, add_res, now):
 
 def _fetch(company, label, fn, default=None):
     """Call fn(), return result or default on error."""
-    if default is None:
-        default = []
-    try:
-        return fn()
-    except Exception as e:
-        logging.warning(f"[{company}] {label} failed — {e}")
-        return default
-
-
-def _parse_date(val):
-    """Parse NAV date string '2026-06-22' or '0001-01-01' → datetime or None."""
-    if not val:
-        return None
-    try:
-        d = datetime.strptime(str(val)[:10], "%Y-%m-%d")
-        if d.year <= 1:
-            return None
-        return d
-    except ValueError:
-        return None
-
-
-def _parse_decimal(val):
-    """Parse decimal/float value safely."""
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None
+  
