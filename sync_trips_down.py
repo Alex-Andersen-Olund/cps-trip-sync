@@ -509,4 +509,33 @@ def _merge_add_res(cursor, add_res, now):
 
 def _fetch(company, label, fn, default=None):
     """Call fn(), return result or default on error."""
-  
+    if default is None:
+        default = []
+    try:
+        return fn()
+    except Exception as e:
+        logging.warning(f"[{company}] {label} failed — {e}")
+        return default
+
+
+def _parse_date(val):
+    """Parse NAV date string '2026-06-22' or '0001-01-01' → datetime or None."""
+    if not val:
+        return None
+    try:
+        d = datetime.strptime(str(val)[:10], "%Y-%m-%d")
+        if d.year <= 1:
+            return None
+        return d
+    except ValueError:
+        return None
+
+
+def _parse_decimal(val):
+    """Parse decimal/float value safely."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None

@@ -97,7 +97,7 @@ def sync_trips_up():
         _mark(pending_id, "done", attempts, now, synced_up=True, trip_no=trip_no, line_no=line_no)
         processed += 1
 
-    print(f"[sync_trips_up] Done — processed={processed} failed={failed} skipped(backoff)={skipped}")
+    logging.info(f"[sync_trips_up] Done — processed={processed} failed={failed} skipped(backoff)={skipped}")
 
 
 # ------------------------------------------------------------------ #

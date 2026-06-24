@@ -1,1 +1,16 @@
 .venv
+__pycache__
+*.pyc
+.python_packages
+
+# Dev/CLI tools — not needed in deployed package
+run_trip_down.py
+run_trip_up.py
+run_migration.py
+validate_db.py
+test_trip_up.py
+clear_trips.py
+migrations/
+
+# VS Code
+.vscode/
